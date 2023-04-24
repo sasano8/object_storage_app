@@ -1,0 +1,14 @@
+.venv
+dist
+*.egg-info
+.mypy_cache
+.pytest_cache
+.tox
+__pycache__
+.env
+.idea
+.hypothesis
+*.db
+site
+.coverage
+.python-version
