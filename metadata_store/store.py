@@ -133,10 +133,10 @@ class AbstractStorage:
         yield self.__class__.__name__
         if hasattr(self, "storage"):
             yield from self.storage.__iter_storage__()
-    
+
     def get_storage_pipe(self):
         return list(self.__iter_storage__())
-    
+
     def ll(self, src):
         raise NotImplementedError()
 
@@ -166,11 +166,11 @@ class AbstractStorage:
 class VirtualStorage(AbstractStorage):
     def __init__(self, **storages: AbstractStorage):
         self.storages = storages
-        
+
     def _split(self, src: str):
         args = [x for x in src.split("/") if x]
         return args
-        
+
     def ll(self, src: str):
         args = self._split(src)
         if len(args) == 0:
@@ -212,9 +212,16 @@ class LocalStorage(AbstractStorage):
     def __init__(self, root: str):
         _ = os.path.abspath(root)
         _ = os.path.normpath(_)
+
+        if not os.path.exists(_):
+            raise Exception()
+
         self.root = _
 
     def _join(self, path):
+        if not path:
+            return self.root
+
         if os.path.isabs(path):
             raise Exception()
         _ = os.path.join(self.root, path)
@@ -243,7 +250,7 @@ class LocalStorage(AbstractStorage):
         _path = self._join(src)
         return os.path.exists(_path)
 
-    def create(self, file, dest, emit: bool = True):
+    def create(self, file, dest: str, emit: bool = True):
         if self.exists(dest):
             raise Http409_Conflict()
         _path = self._join(dest)
@@ -253,14 +260,16 @@ class LocalStorage(AbstractStorage):
             shutil.copyfileobj(file, f)
             f.flush()
 
-    def put(self, file, dest: str = "", emit: bool = True):
+        return self.info(dest)
+
+    def put(self, file, dest: str, emit: bool = True):
         _path = self._join(dest)
         _parent = os.path.dirname(_path)
         os.makedirs(_parent, exist_ok=True)
-        
-        if not os.path.isdir(_path):
+
+        if os.path.isdir(_path):
             raise Http409_Conflict("ディレクトリにオブジェクトはputできません")
-        
+
         with tempfile.NamedTemporaryFile("wb", delete=False) as temp_file:
             try:
                 shutil.copyfileobj(file, temp_file)
@@ -275,6 +284,7 @@ class LocalStorage(AbstractStorage):
                 raise
 
             os.replace(temp_file.name, _path)
+        return self.info(dest)
 
     def open(self, src, mode: str = "r"):
         _path = self._join(src)
@@ -293,10 +303,10 @@ class CompressionStorage(AbstractStorage):
     def __init__(self, storage: AbstractStorage):
         self.storage = storage
 
+
 class EncryptedStorage(AbstractStorage):
     def __init__(self, storage: AbstractStorage):
         self.storage = storage
-
 
 
 class S3Storage(AbstractStorage):

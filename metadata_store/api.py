@@ -1,5 +1,6 @@
 from http import client
 from threading import local
+
 # from ..strategy import Pipeline, Storage
 
 from fastapi import APIRouter, Header, Response
@@ -20,7 +21,7 @@ from .store import LocalStorage, EncryptedStorage, CompressionStorage
 from typing import Literal
 
 
-client = LocalStorage(os.path.dirname(__file__) + "/../dir_asgi")
+client = LocalStorage(os.path.dirname(__file__) + "/../tests/dir_asgi")
 # client = EncryptedStorage(client)
 # client = CompressionStorage(client)
 
@@ -31,52 +32,60 @@ router = APIRouter()
 
 
 @router.get("/inspect")
-async def inspect():
+async def inspect(src: str = ""):
     return client.get_storage_pipe()
 
 
 @router.get("/ll")
-async def ll(src: str):
+async def ll(src: str = ""):
     return client.ll(src)
 
 
 @router.get("/info")
-async def info(src: str) -> dict:
+async def info(src: str = "") -> dict:
     return client.info(src)
 
 
 @router.get("/exists")
-async def exists(src: str):
+async def exists(src: str = ""):
     return client.exists(src)
 
 
 @router.get("/join")
-async def join(src: str):
+async def join(src: str = ""):
     return client._join(src)
 
 
 @router.post("/create")
 async def create(
-    src: str,
     file: Annotated[UploadFile, File(description="A file read as UploadFile")],
+    dest: str = "",
     meta: Annotated[dict, Form()] = {},
     etag: Annotated[str, Header()] = "",
     content_encoding: Annotated[Literal["gzip", "deflate", "br"], Header()] = "gzip",
     content_md5: Annotated[str, Header()] = "",
     # extract_archive: Annotated[bool, Header(description="サーバー側でアーカイブを展開して保持するか指定します")] = False,
-    archive_format: Annotated[Literal["tar.gz"], Header(description="サーバー側でアーカイブを展開させる場合、想定するアーカイブ形式を指定します")] = None,
-    keep_ext: Annotated[Literal[False], Header(description="サーバー側でアーカイブを展開する場合、archive_formatで指定した形式を除去するか指定します")] = False,
+    archive_format: Annotated[
+        Literal["tar.gz"], Header(description="サーバー側でアーカイブを展開させる場合、想定するアーカイブ形式を指定します")
+    ] = None,
+    keep_ext: Annotated[
+        Literal[False],
+        Header(description="サーバー側でアーカイブを展開する場合、archive_formatで指定した形式を除去するか指定します"),
+    ] = False,
 ):
     """
     zip: 解凍後のサイズに関する情報をアーカイブ内のファイルヘッダーに格納しています
     tar: 解凍後のサイズに関する情報をアーカイブ内のファイルヘッダーに格納しています
     tar.gz: 圧縮されているため、サイズを知ることができません
     """
-    raise Exception()
-    # return f"create: {bucket}"
-    data = local()
-    del data["file"]
-    return data
+    return client.create(file, dest=dest)
+
+    # raise Exception()
+    # # return f"create: {bucket}"
+    # data = local()
+    # del data["file"]
+    # return data
+
 
 # compression
 # gzip
@@ -85,18 +94,35 @@ async def create(
 
 # grpc-encoding
 
+
 @router.post("/put")
-async def put(src: str):
+async def put(
+    file: Annotated[UploadFile, File(description="A file read as UploadFile")],
+    dest: str = "",
+):
     raise Exception()
     return f"put: {src}"
 
 
 @router.post("/load")
-async def open(src: str, mode: Literal["r", "w"] = "r"):
+async def open(src: str = "", mode: Literal["r", "w"] = "r"):
     return client.open(src, mode)
 
-@router.post("/load")
-async def load(src: str, mode: Literal["r", "rb"] = "rb"):
+
+class StramRes(StreamingResponse):
+    media_type = "application/octet-stream"
+
+
+@router.post(
+    "/load",
+    response_class=StramRes,
+    responses={
+        200: {
+            "description": "returns a binary file.",
+        }
+    },
+)
+async def load(src: str = "", mode: Literal["r", "rb"] = "rb"):
     if mode == "r":
         return client.open(src, mode)
     elif mode == "rb":
@@ -104,17 +130,22 @@ async def load(src: str, mode: Literal["r", "rb"] = "rb"):
     else:
         raise Exception()
 
+
 @router.post("/delete")
-async def delete(src: str):
+async def delete(src: str = ""):
     return client.delete(src)
 
 
 @router.options("/create")
 async def upload_options(response: Response):
     response.headers["Access-Control-Allow-Methods"] = "OPTIONS, POST"
-    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Content-Encoding, Max-Upload-Size, Archive-Handling-Mode, Accepted-Archive-Formats"
+    response.headers[
+        "Access-Control-Allow-Headers"
+    ] = "Content-Type, Content-Encoding, Max-Upload-Size, Archive-Handling-Mode, Accepted-Archive-Formats"
     response.headers["Max-Upload-Size"] = str(1024 * 1024 * 10)  # 10 MB
-    response.headers["Archive-Handling-Mode"] = "no-extract, extract"  # 展開してサーバーに置くか否か（ファイルとディレクトリの場合で変えてもらう）
+    response.headers[
+        "Archive-Handling-Mode"
+    ] = "no-extract, extract"  # 展開してサーバーに置くか否か（ファイルとディレクトリの場合で変えてもらう）
     response.headers["Accepted-Archive-Formats"] = "tar.gz, zip"  # サポートするアーカイブ
     response.headers["Archive-Name-Mode"] = "keep"  # サーバー側で拡張子を除去するか否か  # remove_ext
     return response
@@ -254,3 +285,30 @@ X- ヘッダーが標準になった時、移行が楽。
 メタデータを管理する方式
 メターデータ管理サーバ -> ローカルファイルシステム
 """
+
+
+# client.distribute(
+#     "asdfas",
+#     storage["a"],
+#     storage["b"],
+#     storage["c"],
+#     storage["d"],
+#     storage["e"],
+# )
+
+
+# class Downloader:
+#     def ll(self):
+#         ...
+
+#     def download(self):
+#         ...
+
+# class Distributor:
+#     def __init__(self, *downloadables):
+#         self.downloadables = downloadables
+
+#     def download(self):
+#         items = self.downloadables.ll()
+#         for item in items:
+#             item.download()

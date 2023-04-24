@@ -9,13 +9,7 @@ from metadata_store.exeptions import Http409_Conflict
 from metadata_store.app import app
 
 
-
 import pytest
-from httpx import AsyncClient
-from contextlib import asynccontextmanager
-from typing import AsyncIterator, AsyncContextManager
-from object_storage.exeptions import Http400BadRequest
-
 
 
 def get_test_dir(path):
@@ -28,7 +22,6 @@ def persistent():
     root = get_test_dir("dir_local_storage")
     os.makedirs(root, exist_ok=True)
 
-    print(root)
     for item in os.listdir(root):
         path = os.path.join(root, item)
         if os.path.isfile(path):
@@ -66,7 +59,7 @@ def test_local_storage_base(persistent: str):
     assert isinstance(storage.info(""), dict)
 
 
-def test_local_storage_put(persistent: str):
+def test_local_storage_scenario(persistent: str):
     storage = LocalStorage(persistent)
     assert len(list(storage.ll(""))) == 0
     assert storage.exists("output1") == False
@@ -109,19 +102,5 @@ def test_virtual_buckets(persistent: str):
     storage = LocalStorage(persistent)
     vstorage = VirtualStorage(bucket1=storage, bucket2=storage)
 
-    assert list(vstorage.ll("")) == [{'name': 'bucket1'}, {'name': 'bucket2'}]
+    assert list(vstorage.ll("")) == [{"name": "bucket1"}, {"name": "bucket2"}]
     assert list(vstorage.ll("bucket1/")) == []
-
-
-@pytest.fixture
-async def client():
-    async with AsyncClient(app=app, base_url="http://127.0.0.1:8000/v1") as ac:
-        yield ac
-
-
-@pytest.mark.anyio
-async def test_asgi_client(client: AsyncClient):
-    response = await client.get("/inspect")
-    assert response.status_code == 200
-    res = response.json()
-    assert res == ["LocalStorage"]
