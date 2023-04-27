@@ -1,5 +1,6 @@
 from http import client
 from threading import local
+from unittest import result
 
 # from ..strategy import Pipeline, Storage
 
@@ -17,11 +18,12 @@ import asyncer
 
 import fsspec
 
-from .store import LocalStorage, EncryptedStorage, CompressionStorage
+from .store import LocalStorage, EncryptedStorage, CompressionStorage, AsyncLocalStorage
 from typing import Literal
 
 
-client = LocalStorage(os.path.dirname(__file__) + "/../tests/dir_asgi")
+# client = LocalStorage(os.path.dirname(__file__) + "/../tests/dir_asgi")
+client = AsyncLocalStorage(os.path.dirname(__file__) + "/../tests/dir_asgi")
 # client = EncryptedStorage(client)
 # client = CompressionStorage(client)
 
@@ -38,17 +40,20 @@ async def inspect(src: str = ""):
 
 @router.get("/ll")
 async def ll(src: str = ""):
-    return client.ll(src)
+    result = []
+    async for x in client.ll(src):
+        result.append(x)
+    return result
 
 
 @router.get("/info")
 async def info(src: str = "") -> dict:
-    return client.info(src)
+    return await client.info(src)
 
 
 @router.get("/exists")
 async def exists(src: str = ""):
-    return client.exists(src)
+    return await client.exists(src)
 
 
 @router.get("/join")
@@ -78,13 +83,7 @@ async def create(
     tar: 解凍後のサイズに関する情報をアーカイブ内のファイルヘッダーに格納しています
     tar.gz: 圧縮されているため、サイズを知ることができません
     """
-    return client.create(file, dest=dest)
-
-    # raise Exception()
-    # # return f"create: {bucket}"
-    # data = local()
-    # del data["file"]
-    # return data
+    return await client.create(file, dest=dest)
 
 
 # compression
@@ -99,14 +98,38 @@ async def create(
 async def put(
     file: Annotated[UploadFile, File(description="A file read as UploadFile")],
     dest: str = "",
+    meta: Annotated[dict, Form()] = {},
+    etag: Annotated[str, Header()] = "",
+    content_encoding: Annotated[Literal["gzip", "deflate", "br"], Header()] = "gzip",
+    content_md5: Annotated[str, Header()] = "",
+    # extract_archive: Annotated[bool, Header(description="サーバー側でアーカイブを展開して保持するか指定します")] = False,
+    archive_format: Annotated[
+        Literal["tar.gz"], Header(description="サーバー側でアーカイブを展開させる場合、想定するアーカイブ形式を指定します")
+    ] = None,
+    keep_ext: Annotated[
+        Literal[False],
+        Header(description="サーバー側でアーカイブを展開する場合、archive_formatで指定した形式を除去するか指定します"),
+    ] = False,
 ):
-    raise Exception()
-    return f"put: {src}"
+    """
+    zip: 解凍後のサイズに関する情報をアーカイブ内のファイルヘッダーに格納しています
+    tar: 解凍後のサイズに関する情報をアーカイブ内のファイルヘッダーに格納しています
+    tar.gz: 圧縮されているため、サイズを知ることができません
+    """
+    return await client.put(file, dest=dest)
+
+
+from fastapi.responses import StreamingResponse
 
 
 @router.post("/load")
-async def open(src: str = "", mode: Literal["r", "w"] = "r"):
-    return client.open(src, mode)
+async def open(src: str = "", mode: Literal["rb"] = "rb"):
+    async def generate():
+        async with await client.open(src, mode) as f:
+            async for x in f:
+                yield x
+
+    return StreamingResponse(generate(), media_type="application/octet-stream")
 
 
 class StramRes(StreamingResponse):
@@ -131,9 +154,12 @@ async def load(src: str = "", mode: Literal["r", "rb"] = "rb"):
         raise Exception()
 
 
+# ファイルをダウンロードさせるとき、Content-Disposition に attachment; をつける方式と、application/octet-stream をつける方式がある
+
+
 @router.post("/delete")
 async def delete(src: str = ""):
-    return client.delete(src)
+    return await client.delete(src)
 
 
 @router.options("/create")
@@ -312,3 +338,85 @@ X- ヘッダーが標準になった時、移行が楽。
 #         items = self.downloadables.ll()
 #         for item in items:
 #             item.download()
+
+
+def create_signing_key(secret_key: str, datestamp, region, service):
+    import hmac
+    import hashlib
+    import datetime
+
+    # hmac(Hash Based Message Authentication Code)
+    k_date = hmac.new(
+        b"AWS4" + secret_key.encode("utf-8"), datestamp.encode("utf-8"), hashlib.sha256
+    ).digest()
+    k_region = hmac.new(k_date, region.encode("utf-8"), hashlib.sha256).digest()
+    k_service = hmac.new(k_region, service.encode("utf-8"), hashlib.sha256).digest()
+    k_signing = hmac.new(k_service, b"aws4_request", hashlib.sha256).digest()
+    return k_signing
+
+
+from fastapi import Request
+
+
+def verify_sigv4_signature(request: Request, x_amz_date: str, authorization: str):
+    import hashlib
+    import hmac
+
+    signed_headers = authorization.split("SignedHeaders=")[1].split(",")[0]
+    request_method = request.method
+    canonical_uri = request.url.path
+    canonical_querystring = request.url.query
+
+    canonical_headers = ""
+    for header in signed_headers.split(";"):
+        canonical_headers += f"{header}:{request.headers[header]}\n"
+
+    payload_hash = hashlib.sha256(request.body).hexdigest()
+
+    canonical_request = f"{request_method}\n{canonical_uri}\n{canonical_querystring}\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
+    canonical_request_hash = hashlib.sha256(
+        canonical_request.encode("utf-8")
+    ).hexdigest()
+
+    datestamp = x_amz_date[:8]
+    credential_scope = f"{datestamp}/{AWS_REGION}/s3/aws4_request"
+
+    string_to_sign = (
+        f"AWS4-HMAC-SHA256\n{x_amz_date}\n{credential_scope}\n{canonical_request_hash}"
+    )
+
+    signing_key = create_signing_key(AWS_SECRET_ACCESS_KEY, datestamp, AWS_REGION, "s3")
+    signature = hmac.new(
+        signing_key, string_to_sign.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+
+    return signature
+
+
+async def your_endpoint(
+    request: Request, x_amz_date: str = Header(None), authorization: str = Header(None)
+):
+    if not x_amz_date or not authorization:
+        raise HTTPException(status_code=400, detail="Missing required headers")
+
+    try:
+        calculated_signature = verify_sigv4_signature(
+            request, x_amz_date, authorization
+        )
+        provided_signature = authorization.split("Signature=")[1]
+
+        if calculated_signature != provided_signature:
+            raise HTTPException(status_code=403, detail="Invalid signature")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return {"message": "Valid signature"}
+
+
+# canonical_request =
+
+# メッセージ認証符号（MAC）とディジタル署名MAC
+# HMAC-based One-Time Password
+# 署名付きURL: 誰でも取得できる有効期間付きのURLを発行する
+
+# HAMCは送受信者間の完全性の確認と共有鍵に依存した

@@ -8,6 +8,14 @@ packages = [{include = "object_storage_app"}]
 
 [tool.poetry.dependencies]
 python = "^3.8"
+boto3 = "^1.26.121"
+pandas = "^2.0.1"
+pyarrow = "^11.0.0"
+h5py = "^3.8.0"
+tantivy = "^0.13.2"
+hyperdb-python = "^0.1.2"
+svn = "^1.0.1"
+aiofiles = "^23.1.0"
 
 
 [build-system]

@@ -1,8 +1,10 @@
-from genericpath import isdir
 import os
-from posixpath import isabs
 import shutil
 import tempfile
+from typing import AsyncContextManager
+import asyncer
+import inspect
+import asyncio
 
 from .exeptions import Http409_Conflict, Http500InternalError
 
@@ -84,12 +86,48 @@ def config_spec():
     }
 
 
-def migration(_from, to):
-    ...
+class SyncFile:
+    def __init__(self, file):
+        self.file = file
 
+        iscoroutine = inspect.iscoroutinefunction(self.file.read)
+        try:
+            loop = asyncio.get_running_loop()
+        except Exception:
+            loop = None
 
-def push(local, upstream):
-    ...
+        if iscoroutine:
+            if loop:
+
+                def read(size=None):
+                    params = [] if size is None else [size]
+                    loop = asyncio.get_event_loop()
+
+                    coro = self.file.read(*params)
+                    # future = asyncio.run_coroutine_threadsafe(coro, loop)
+
+                    # イベントループ中で非同期関数は同期関数にできない！！！！
+                    import anyio
+
+                    return anyio.run_async_from_thread(self.file.read, *params)
+
+                    # return anyio.from_thread.run(self.file.read, *params)
+                    # task = asyncio.create_task(coro)
+                    # handler = loop.call_soon_threadsafe(task)
+                    # return task.result()
+
+                self._read = read
+            else:
+                self._read = asyncer.syncify(self.file.read)
+        else:
+            if loop:
+                self._read = self.file.read
+            else:
+                self._read = self.file.read
+
+    def read(self, size=None):
+        params = [] if size is None else [size]
+        return self._read(*params)
 
 
 def creation_date(path_to_file):
@@ -251,13 +289,14 @@ class LocalStorage(AbstractStorage):
         return os.path.exists(_path)
 
     def create(self, file, dest: str, emit: bool = True):
+        # asyncer.syncify()
         if self.exists(dest):
             raise Http409_Conflict()
         _path = self._join(dest)
         _parent = os.path.dirname(_path)
         os.makedirs(_parent, exist_ok=True)
         with open(_path, "wb") as f:
-            shutil.copyfileobj(file, f)
+            shutil.copyfileobj(SyncFile(file), f)
             f.flush()
 
         return self.info(dest)
@@ -290,10 +329,103 @@ class LocalStorage(AbstractStorage):
         _path = self._join(src)
         return open(_path, mode)
 
-    def delete(self, src) -> int:
+    def delete(self, src: str) -> int:
         if self.exists(src):
             _path = self._join(src)
             os.remove(_path)
+            return 1
+        else:
+            return 0
+
+
+import anyio
+from anyio import AsyncFile
+import aiofiles
+
+
+class AsyncLocalStorage(LocalStorage):
+    # def __init__(self, storage: AbstractStorage):
+    #     self.storage = storage
+
+    async def ll(self, src: str = ""):
+        _path = self._join(src)
+        for item in await asyncer.asyncify(os.listdir)(_path):
+            child = os.path.join(_path, item)
+            _stat = await asyncer.asyncify(os.stat)(child, follow_symlinks=False)
+            rel_path = os.path.relpath(child, self.root)
+            info = stat_to_dict(rel_path, _stat)
+            yield info
+
+    async def info(self, src: str = ""):
+        _path = self._join(src)
+        _stat = await asyncer.asyncify(os.stat)(_path, follow_symlinks=False)
+        rel_path = os.path.relpath(_path, self.root)
+        info = stat_to_dict(rel_path, _stat)
+        # os.stat_result(st_mode=16877, st_ino=421427, st_dev=2080, st_nlink=5, st_uid=1000, st_gid=1000, st_size=4096, st_atime=1682185290, st_mtime=1682185286, st_ctime=1682185286)
+        # st_birthtime を持っていることがある
+        #
+        return info
+
+    async def exists(self, src: str = ""):
+        _path = self._join(src)
+        return await asyncer.asyncify(os.path.exists)(_path)
+
+    async def create(self, file: AsyncFile, dest: str, emit: bool = True):
+        if await self.exists(dest):
+            raise Http409_Conflict()
+        _path = self._join(dest)
+        _parent = os.path.dirname(_path)
+        await asyncer.asyncify(os.makedirs)(_parent, exist_ok=True)
+
+        mode = "wb"
+        async with await anyio.open_file(_path, mode) as f:
+            while buf := await file.read(1024 * 1024 * 10):
+                await f.write(buf)
+                await f.flush()
+
+            return await self.info(dest)
+
+    async def put(self, file, dest: str, emit: bool = True):
+        _path = self._join(dest)
+        _parent = os.path.dirname(_path)
+        await asyncer.asyncify(os.makedirs)(_parent, exist_ok=True)
+
+        if await asyncer.asyncify(os.path.isdir)(_path):
+            raise Http409_Conflict("ディレクトリにオブジェクトはputできません")
+
+        async with aiofiles.tempfile.NamedTemporaryFile(
+            "wb", delete=False
+        ) as temp_file:
+            try:
+                mode = "wb"
+                async with await anyio.open_file(_path, mode) as f:
+                    while buf := await file.read(1024 * 1024 * 10):
+                        await temp_file.write(buf)
+                        await temp_file.flush()
+
+                await asyncer.asyncify(os.fsync)(
+                    temp_file.fileno()
+                )  # ハードディスクに書き込まれたことを保証する
+            except Exception as e:
+                try:
+                    await asyncer.asyncify(os.unlink)(temp_file.name)
+                except Exception:
+                    ...
+
+                raise
+
+            await asyncer.asyncify(os.replace)(temp_file.name, _path)
+        return await self.info(dest)
+
+    async def open(self, src, mode: str = "r") -> AsyncFile:
+        _path = self._join(src)
+        f = await anyio.open_file(_path, mode=mode)
+        return f
+
+    async def delete(self, src: str):
+        if await self.exists(src):
+            _path = self._join(src)
+            await asyncer.asyncify(os.remove)(_path)
             return 1
         else:
             return 0
